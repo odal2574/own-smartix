@@ -1,0 +1,18 @@
+[Unit]
+Description=Personal Smartix Bot
+After=network.target
+
+[Service]
+Type=simple
+User=smartix
+Group=smartix
+WorkingDirectory=/opt/smartix
+ExecStart=/usr/bin/node bot.js
+EnvironmentFile=/opt/smartix/.env
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/smartix.log
+StandardError=append:/var/log/smartix.log
+
+[Install]
+WantedBy=multi-user.target
