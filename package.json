@@ -1,0 +1,19 @@
+{
+  "name": "own-smartix",
+  "version": "0.1.0",
+  "description": "Personal AI assistant on Telegram + Claude. File-based memory and skills.",
+  "main": "bot.js",
+  "type": "module",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.0",
+    "telegraf": "^4.16.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
