@@ -1,16 +1,10 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
-import { askClaude } from './lib/claude.js';
-import { getHistory, appendMessage, resetHistory } from './lib/sessions.js';
+import { askClaude, resetClaudeSession } from './lib/claude.js';
 
-const {
-  TELEGRAM_BOT_TOKEN,
-  ANTHROPIC_API_KEY,
-  OWNER_TELEGRAM_ID,
-} = process.env;
+const { TELEGRAM_BOT_TOKEN, OWNER_TELEGRAM_ID } = process.env;
 
 if (!TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN не задан в .env');
-if (!ANTHROPIC_API_KEY) throw new Error('ANTHROPIC_API_KEY не задан в .env');
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const OWNER = OWNER_TELEGRAM_ID ? Number(OWNER_TELEGRAM_ID) : null;
@@ -34,7 +28,7 @@ bot.start((ctx) => {
     'Просто пиши задачу, идею, вопрос — отвечу и запомню что важно.\n\n' +
     'Команды:\n' +
     '/help — что я умею\n' +
-    '/reset — забыть текущий диалог (память останется)'
+    '/reset — начать новую сессию (память останется)'
   );
 });
 
@@ -46,14 +40,14 @@ bot.help((ctx) => {
     '• Вести дневник (workspace/memory/YYYY-MM-DD.md)\n' +
     '• Сохранять решения в базу знаний (workspace/knowledge/)\n' +
     '• Подключать скиллы (workspace/.claude/skills/)\n\n' +
-    'Скажи «запомни это» — сохраню в долгосрочную память.\n' +
+    'Скажи «запомни это» — сохраню в MEMORY.md.\n' +
     'Скажи «сохрани в заметки» — добавлю в дневник.'
   );
 });
 
 bot.command('reset', async (ctx) => {
-  await resetHistory(ctx.from.id);
-  ctx.reply('История диалога очищена. Долгосрочная память (MEMORY.md) сохранена.');
+  await resetClaudeSession(ctx.from.id);
+  ctx.reply('Новая сессия начата. Долгосрочная память (MEMORY.md, knowledge/) сохранена.');
 });
 
 const splitForTelegram = (text, limit = 4000) => {
@@ -80,11 +74,7 @@ bot.on('text', async (ctx) => {
   );
 
   try {
-    await appendMessage(userId, 'user', text);
-    const history = await getHistory(userId, 20);
-    const answer = await askClaude(history);
-    await appendMessage(userId, 'assistant', answer);
-
+    const answer = await askClaude(userId, text);
     for (const chunk of splitForTelegram(answer)) {
       await ctx.reply(chunk);
     }
@@ -99,7 +89,7 @@ bot.on('text', async (ctx) => {
 bot.catch((err) => console.error('[telegraf]', err));
 
 bot.launch().then(() => {
-  console.log(`[smartix] started, owner=${OWNER ?? 'any'}, model=${process.env.CLAUDE_MODEL || 'claude-sonnet-4-6'}`);
+  console.log(`[smartix] started, owner=${OWNER ?? 'any'}, model=${process.env.CLAUDE_MODEL || 'default'}`);
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
