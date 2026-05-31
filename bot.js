@@ -1,6 +1,14 @@
 import 'dotenv/config';
 import { Telegraf } from 'telegraf';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { askClaude, resetClaudeSession } from './lib/claude.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const WORKSPACE = path.resolve(__dirname, 'workspace');
+const INBOX = path.join(WORKSPACE, 'inbox');
+fs.mkdirSync(INBOX, { recursive: true });
 
 const { TELEGRAM_BOT_TOKEN, OWNER_TELEGRAM_ID } = process.env;
 
@@ -39,7 +47,13 @@ bot.help((ctx) => {
     '• Запоминать факты (workspace/MEMORY.md)\n' +
     '• Вести дневник (workspace/memory/YYYY-MM-DD.md)\n' +
     '• Сохранять решения в базу знаний (workspace/knowledge/)\n' +
-    '• Подключать скиллы (workspace/.claude/skills/)\n\n' +
+    '• Подключать скиллы (workspace/.claude/skills/)\n' +
+    '• Отправлять файлы: HTML, PDF, презентации, картинки, видео\n' +
+    '• Принимать твои фото и документы\n\n' +
+    'Команды:\n' +
+    '/start — приветствие\n' +
+    '/help — это сообщение\n' +
+    '/reset — новая сессия (память останется)\n\n' +
     'Скажи «запомни это» — сохраню в MEMORY.md.\n' +
     'Скажи «сохрани в заметки» — добавлю в дневник.'
   );
@@ -63,6 +77,54 @@ const splitForTelegram = (text, limit = 4000) => {
   return chunks;
 };
 
+const MEDIA_TAG_RE = /\[(ФАЙЛ|ФОТО|ВИДЕО|АУДИО|GIF)\s*:\s*([^\]\n]+?)\]/g;
+
+function extractMediaTags(text) {
+  const items = [];
+  const cleaned = text.replace(MEDIA_TAG_RE, (_, kind, body) => {
+    const trimmed = body.trim();
+    const spaceIdx = trimmed.search(/\s/);
+    const filePath = spaceIdx === -1 ? trimmed : trimmed.slice(0, spaceIdx);
+    const caption = spaceIdx === -1 ? '' : trimmed.slice(spaceIdx + 1).trim();
+    items.push({ kind, path: filePath, caption });
+    return '';
+  });
+  return { cleanText: cleaned.trim(), items };
+}
+
+function resolveMediaPath(p) {
+  if (p.startsWith('~/')) return path.join(process.env.HOME || '/root', p.slice(2));
+  if (p.startsWith('/')) return p;
+  return path.resolve(WORKSPACE, p);
+}
+
+async function sendMediaItem(ctx, item) {
+  const abs = resolveMediaPath(item.path);
+  if (!fs.existsSync(abs)) {
+    await ctx.reply(`Не нашёл файл: ${item.path}`);
+    return;
+  }
+  const source = { source: abs };
+  const extra = item.caption ? { caption: item.caption } : {};
+  switch (item.kind) {
+    case 'ФОТО':
+      await ctx.replyWithPhoto(source, extra);
+      break;
+    case 'ВИДЕО':
+      await ctx.replyWithVideo(source, extra);
+      break;
+    case 'АУДИО':
+      await ctx.replyWithAudio(source, extra);
+      break;
+    case 'GIF':
+      await ctx.replyWithAnimation(source, extra);
+      break;
+    case 'ФАЙЛ':
+    default:
+      await ctx.replyWithDocument(source, extra);
+  }
+}
+
 bot.on('text', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text;
@@ -75,8 +137,19 @@ bot.on('text', async (ctx) => {
 
   try {
     const answer = await askClaude(userId, text);
-    for (const chunk of splitForTelegram(answer)) {
-      await ctx.reply(chunk);
+    const { cleanText, items } = extractMediaTags(answer);
+    if (cleanText) {
+      for (const chunk of splitForTelegram(cleanText)) {
+        await ctx.reply(chunk);
+      }
+    }
+    for (const item of items) {
+      try {
+        await sendMediaItem(ctx, item);
+      } catch (e) {
+        console.error('[media]', item, e.message);
+        await ctx.reply(`Не смог отправить ${item.kind}: ${e.message}`);
+      }
     }
   } catch (err) {
     console.error('[error]', err);
@@ -88,8 +161,17 @@ bot.on('text', async (ctx) => {
 
 bot.catch((err) => console.error('[telegraf]', err));
 
-bot.launch().then(() => {
+bot.launch().then(async () => {
   console.log(`[smartix] started, owner=${OWNER ?? 'any'}, model=${process.env.CLAUDE_MODEL || 'default'}`);
+  try {
+    await bot.telegram.setMyCommands([
+      { command: 'start', description: 'Приветствие' },
+      { command: 'help', description: 'Что я умею' },
+      { command: 'reset', description: 'Новая сессия (память останется)' },
+    ]);
+  } catch (e) {
+    console.error('[setMyCommands]', e.message);
+  }
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
