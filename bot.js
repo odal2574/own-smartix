@@ -125,18 +125,27 @@ async function sendMediaItem(ctx, item) {
   }
 }
 
-bot.on('text', async (ctx) => {
-  const userId = ctx.from.id;
-  const text = ctx.message.text;
+async function downloadTelegramFile(ctx, fileId, suggestedName) {
+  const link = await ctx.telegram.getFileLink(fileId);
+  const res = await fetch(link.href);
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const buf = Buffer.from(await res.arrayBuffer());
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const safe = (suggestedName || `file_${ts}`).replace(/[^\w.\-]/g, '_');
+  const finalPath = path.join(INBOX, `${ts}_${safe}`);
+  fs.writeFileSync(finalPath, buf);
+  return finalPath;
+}
 
+async function runClaudeAndReply(ctx, prompt) {
+  const userId = ctx.from.id;
   await ctx.replyWithChatAction('typing');
   const typingInterval = setInterval(
     () => ctx.replyWithChatAction('typing').catch(() => {}),
     4000
   );
-
   try {
-    const answer = await askClaude(userId, text);
+    const answer = await askClaude(userId, prompt);
     const { cleanText, items } = extractMediaTags(answer);
     if (cleanText) {
       for (const chunk of splitForTelegram(cleanText)) {
@@ -157,6 +166,41 @@ bot.on('text', async (ctx) => {
   } finally {
     clearInterval(typingInterval);
   }
+}
+
+bot.on('photo', async (ctx) => {
+  try {
+    const photos = ctx.message.photo;
+    const largest = photos[photos.length - 1];
+    const filePath = await downloadTelegramFile(ctx, largest.file_id, `photo_${largest.file_unique_id}.jpg`);
+    const caption = ctx.message.caption || '';
+    const prompt = caption
+      ? `Клиент прислал фото. Путь: ${filePath}\nПодпись: ${caption}`
+      : `Клиент прислал фото. Путь: ${filePath}\nПосмотри что на нём и ответь.`;
+    await runClaudeAndReply(ctx, prompt);
+  } catch (err) {
+    console.error('[photo]', err);
+    await ctx.reply(`Не смог принять фото: ${err.message}`);
+  }
+});
+
+bot.on('document', async (ctx) => {
+  try {
+    const doc = ctx.message.document;
+    const filePath = await downloadTelegramFile(ctx, doc.file_id, doc.file_name);
+    const caption = ctx.message.caption || '';
+    const prompt = caption
+      ? `Клиент прислал документ. Путь: ${filePath}\nИмя: ${doc.file_name}\nПодпись: ${caption}`
+      : `Клиент прислал документ. Путь: ${filePath}\nИмя: ${doc.file_name}\nПосмотри и ответь.`;
+    await runClaudeAndReply(ctx, prompt);
+  } catch (err) {
+    console.error('[document]', err);
+    await ctx.reply(`Не смог принять документ: ${err.message}`);
+  }
+});
+
+bot.on('text', async (ctx) => {
+  await runClaudeAndReply(ctx, ctx.message.text);
 });
 
 bot.catch((err) => console.error('[telegraf]', err));
