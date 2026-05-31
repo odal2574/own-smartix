@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { askClaude, resetClaudeSession } from './lib/claude.js';
+import { getSessionId } from './lib/sessions.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WORKSPACE = path.resolve(__dirname, 'workspace');
@@ -16,6 +17,8 @@ if (!TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN не задан в 
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const OWNER = OWNER_TELEGRAM_ID ? Number(OWNER_TELEGRAM_ID) : null;
+const STARTED_AT = Date.now();
+const activeTasks = new Map();
 
 function isAllowed(ctx) {
   if (!OWNER) return true;
@@ -62,6 +65,61 @@ bot.help((ctx) => {
 bot.command('reset', async (ctx) => {
   await resetClaudeSession(ctx.from.id);
   ctx.reply('Новая сессия начата. Долгосрочная память (MEMORY.md, knowledge/) сохранена.');
+});
+
+bot.command('stop', async (ctx) => {
+  const task = activeTasks.get(ctx.from.id);
+  if (!task) {
+    ctx.reply('Нет активной задачи.');
+    return;
+  }
+  task.abort();
+  activeTasks.delete(ctx.from.id);
+  ctx.reply('Задача остановлена.');
+});
+
+bot.command('settings', async (ctx) => {
+  const sessionId = await getSessionId(ctx.from.id);
+  const lines = [
+    'Настройки клона:',
+    '',
+    `Модель: ${process.env.CLAUDE_MODEL || 'default (Sonnet)'}`,
+    `Владелец: ${OWNER ?? 'любой'}`,
+    `Workspace: ${WORKSPACE}`,
+    `Активная сессия Claude: ${sessionId ? sessionId.slice(0, 8) + '…' : 'нет'}`,
+    '',
+    'Изменить настройки можно через .env на сервере:',
+    '/opt/smartix/.env',
+    '',
+    'После правки .env — systemctl restart smartix',
+  ];
+  ctx.reply(lines.join('\n'));
+});
+
+bot.command('status', async (ctx) => {
+  const uptimeSec = Math.floor((Date.now() - STARTED_AT) / 1000);
+  const h = Math.floor(uptimeSec / 3600);
+  const m = Math.floor((uptimeSec % 3600) / 60);
+  const s = uptimeSec % 60;
+  const memMB = Math.round(process.memoryUsage().rss / 1024 / 1024);
+  const sessionsFile = path.join(__dirname, 'sessions', 'sessions.json');
+  let sessionsCount = 0;
+  try {
+    const raw = fs.readFileSync(sessionsFile, 'utf8');
+    sessionsCount = Object.keys(JSON.parse(raw)).length;
+  } catch {}
+  const lines = [
+    'Статус клона:',
+    '',
+    `Бот: работает`,
+    `Аптайм: ${h}ч ${m}м ${s}с`,
+    `Память процесса: ${memMB} MB`,
+    `Модель: ${process.env.CLAUDE_MODEL || 'default'}`,
+    `Активных задач сейчас: ${activeTasks.size}`,
+    `Всего сессий в памяти: ${sessionsCount}`,
+    `Node: ${process.version}`,
+  ];
+  ctx.reply(lines.join('\n'));
 });
 
 const splitForTelegram = (text, limit = 4000) => {
@@ -144,8 +202,10 @@ async function runClaudeAndReply(ctx, prompt) {
     () => ctx.replyWithChatAction('typing').catch(() => {}),
     4000
   );
+  const controller = new AbortController();
+  activeTasks.set(userId, controller);
   try {
-    const answer = await askClaude(userId, prompt);
+    const answer = await askClaude(userId, prompt, controller.signal);
     const { cleanText, items } = extractMediaTags(answer);
     if (cleanText) {
       for (const chunk of splitForTelegram(cleanText)) {
@@ -161,10 +221,15 @@ async function runClaudeAndReply(ctx, prompt) {
       }
     }
   } catch (err) {
-    console.error('[error]', err);
-    await ctx.reply(`Ошибка: ${err.message}`);
+    if (controller.signal.aborted) {
+      console.log('[aborted]', userId);
+    } else {
+      console.error('[error]', err);
+      await ctx.reply(`Ошибка: ${err.message}`);
+    }
   } finally {
     clearInterval(typingInterval);
+    if (activeTasks.get(userId) === controller) activeTasks.delete(userId);
   }
 }
 
@@ -209,9 +274,11 @@ bot.launch().then(async () => {
   console.log(`[smartix] started, owner=${OWNER ?? 'any'}, model=${process.env.CLAUDE_MODEL || 'default'}`);
   try {
     await bot.telegram.setMyCommands([
-      { command: 'start', description: 'Приветствие' },
-      { command: 'help', description: 'Что я умею' },
-      { command: 'reset', description: 'Новая сессия (память останется)' },
+      { command: 'start', description: 'Меню' },
+      { command: 'stop', description: 'Остановить задачу' },
+      { command: 'reset', description: 'Новая сессия' },
+      { command: 'settings', description: 'Настройки' },
+      { command: 'status', description: 'Статус системы' },
     ]);
   } catch (e) {
     console.error('[setMyCommands]', e.message);
